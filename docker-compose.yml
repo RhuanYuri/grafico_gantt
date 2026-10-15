@@ -1,4 +1,16 @@
 services:
+  app:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - DATABASE_URL=postgres://gantt:gantt@db:5432/gantt
+      - PORT=3000
+    depends_on:
+      db:
+        condition: service_healthy
+
   db:
     image: postgres:16-alpine
     container_name: gantt-db

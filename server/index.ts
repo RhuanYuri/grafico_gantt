@@ -1,5 +1,8 @@
 import express from 'express'
 import pg from 'pg'
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import type { Task, TaskStatus, User } from '../src/types'
 import { SEED_TASKS, SEED_USERS } from './seed'
 
@@ -162,18 +165,45 @@ async function main() {
     res.status(204).end()
   }))
 
+  app.get('/api/health', wrap(async (_req, res) => void res.json({ status: 'ok' })))
+
   app.post('/api/reset', wrap(async (_req, res) => {
     await tx(seed)
     res.json(await readState())
   }))
+
+  // Servir frontend compilado (produção)
+  const __dirname = path.dirname(fileURLToPath(import.meta.url))
+  const candidateDistPaths = [
+    path.resolve(__dirname, '../dist'),
+    path.resolve(__dirname, 'dist'),
+    path.resolve(__dirname, '.'),
+  ]
+  const distPath = candidateDistPaths.find((p) => fs.existsSync(path.join(p, 'index.html')))
+
+  if (distPath) {
+    app.use(express.static(distPath))
+    app.use((req, res, next) => {
+      if (req.method === 'GET' && !req.path.startsWith('/api')) {
+        return res.sendFile(path.join(distPath, 'index.html'))
+      }
+      next()
+    })
+  }
 
   app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     console.error(err)
     res.status(500).json({ error: err.message })
   })
 
-  const port = Number(process.env.API_PORT ?? 3001)
-  app.listen(port, () => console.log(`API do Gantt em http://localhost:${port}`))
+  const port = Number(process.env.PORT ?? process.env.API_PORT ?? 3000)
+  const host = process.env.HOST ?? '0.0.0.0'
+  app.listen(port, host, () => {
+    console.log(`Servidor rodando em http://${host}:${port}`)
+    if (distPath) {
+      console.log(`Frontend estático servido a partir de: ${distPath}`)
+    }
+  })
 }
 
 main().catch((e) => {

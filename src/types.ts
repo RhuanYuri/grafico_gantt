@@ -18,6 +18,13 @@ export interface User {
   email: string
   color: string
   avatarUrl?: string
+  isMaster?: boolean
+}
+
+export interface AdminUser extends User {
+  createdAt?: string
+  teamCount?: number
+  teams?: { id: string; name: string; role: string }[]
 }
 
 export interface Team {

@@ -863,3 +863,348 @@ button { font: inherit; color: inherit; cursor: pointer; }
   transform: scale(1.1);
 }
 
+/* ====================================================================
+   BANNER DE IMPERSONAÇÃO (MODO SUPORTE MASTER)
+   ==================================================================== */
+.impersonation-banner {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 8px 20px;
+  background: linear-gradient(90deg, #b45309 0%, #d97706 50%, #b45309 100%);
+  color: #ffffff;
+  box-shadow: 0 4px 14px rgba(180, 83, 9, 0.35);
+  font-size: 13px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.impersonation-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.impersonation-badge {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  background: rgba(0, 0, 0, 0.35);
+  padding: 3px 8px;
+  border-radius: 9999px;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  text-transform: uppercase;
+}
+
+.impersonation-revert-btn {
+  background: #ffffff !important;
+  color: #92400e !important;
+  font-weight: 700 !important;
+  border: none !important;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2) !important;
+  transition: all 0.2s ease !important;
+}
+
+.impersonation-revert-btn:hover {
+  background: #fef3c7 !important;
+  transform: translateY(-1px);
+}
+
+/* ====================================================================
+   BOTÕES E IDENTIFICADORES DO MASTER
+   ==================================================================== */
+.master-btn {
+  background: linear-gradient(135deg, #1e1b4b 0%, #312e81 100%) !important;
+  color: #f8fafc !important;
+  border: 1px solid #4338ca !important;
+  font-weight: 600 !important;
+  box-shadow: 0 2px 8px rgba(49, 46, 129, 0.3) !important;
+  transition: all 0.2s ease !important;
+}
+
+.master-btn:hover {
+  background: linear-gradient(135deg, #312e81 0%, #3730a3 100%) !important;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(49, 46, 129, 0.45) !important;
+}
+
+.master-indicator-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #6366f1;
+  box-shadow: 0 0 6px #6366f1;
+}
+
+.user-menu-name-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.master-menu-item {
+  color: #4338ca !important;
+  font-weight: 600 !important;
+}
+
+.master-menu-item:hover {
+  background: #eef2ff !important;
+}
+
+.role-tag {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.master-tag {
+  background: #e0e7ff;
+  color: #3730a3;
+  border: 1px solid #c7d2fe;
+}
+
+.user-tag {
+  background: #f1f5f9;
+  color: #64748b;
+  border: 1px solid #e2e8f0;
+}
+
+.master-pill {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  background: #10b981;
+  color: #ffffff;
+  border-radius: 6px;
+}
+
+.modal-title-with-badge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ====================================================================
+   PAINEL MASTER (ADMIN MODAL)
+   ==================================================================== */
+.admin-modal {
+  width: 100%;
+  max-width: 960px;
+}
+
+.admin-modal-content {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-height: 88vh;
+  overflow-y: auto;
+}
+
+.admin-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.stat-card {
+  display: flex;
+  flex-direction: column;
+  padding: 14px 18px;
+  background: #f8fafc;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+
+.stat-value {
+  font-size: 24px;
+  font-weight: 800;
+  color: var(--text);
+}
+
+.stat-label {
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 500;
+  margin-top: 2px;
+}
+
+.admin-search-bar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.admin-search-bar .search-input {
+  flex: 1;
+  padding: 9px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+  outline: none;
+  background: #ffffff;
+}
+
+.admin-search-bar .search-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(47, 111, 224, 0.15);
+}
+
+.admin-users-table-container {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow-x: auto;
+  background: #ffffff;
+}
+
+.admin-users-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  text-align: left;
+}
+
+.admin-users-table th {
+  background: #f8fafc;
+  padding: 10px 14px;
+  font-weight: 600;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+}
+
+.admin-users-table td {
+  padding: 10px 14px;
+  border-bottom: 1px solid #f1f5f9;
+  vertical-align: middle;
+}
+
+.admin-users-table tr:last-child td {
+  border-bottom: none;
+}
+
+.admin-users-table tr.master-row {
+  background: #faf5ff;
+}
+
+.user-info-cell {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.user-name {
+  color: var(--text);
+  font-weight: 600;
+  display: block;
+}
+
+.user-id-sub {
+  font-size: 10px;
+  color: #94a3b8;
+  display: block;
+}
+
+.you-pill {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  background: #e2e8f0;
+  color: #475569;
+  padding: 1px 6px;
+  border-radius: 4px;
+  margin-left: 4px;
+}
+
+.email-badge {
+  font-family: monospace;
+  font-size: 12px;
+  color: #334155;
+  background: #f1f5f9;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.user-teams-cell {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.team-subtag {
+  font-size: 11px;
+  background: #e0f2fe;
+  color: #0369a1;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-weight: 500;
+}
+
+.admin-actions-cell {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.impersonate-btn {
+  background: #0ea5e9 !important;
+  color: #ffffff !important;
+}
+
+.impersonate-btn:hover {
+  background: #0284c7 !important;
+}
+
+/* ====================================================================
+   SUB-MODAIS DO ADMIN (SENHA E EDIÇÃO)
+   ==================================================================== */
+.sub-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.6);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.sub-modal-content {
+  background: #ffffff;
+  padding: 24px;
+  border-radius: 12px;
+  width: 90%;
+  max-width: 440px;
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.2), 0 10px 10px -5px rgba(0, 0, 0, 0.1);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.sub-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.sub-modal-header h3 {
+  margin: 0;
+  font-size: 16px;
+  color: var(--text);
+}
+
+.sub-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+

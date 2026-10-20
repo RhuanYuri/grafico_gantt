@@ -22,10 +22,11 @@ export function verifyPassword(password: string, storedHash: string): boolean {
 
 export interface TokenPayload {
   userId: string
+  isMaster?: boolean
   exp?: number
 }
 
-export function signToken(payload: { userId: string }): string {
+export function signToken(payload: { userId: string; isMaster?: boolean }): string {
   const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url')
   const body = Buffer.from(JSON.stringify({ ...payload, exp: Date.now() + 30 * 24 * 60 * 60 * 1000 })).toString('base64url')
   const signature = crypto.createHmac('sha256', JWT_SECRET).update(`${header}.${body}`).digest('base64url')
@@ -49,6 +50,7 @@ export function verifyToken(token: string): TokenPayload | null {
 
 export interface AuthenticatedRequest extends Request {
   userId?: string
+  isMaster?: boolean
 }
 
 export function authMiddleware(req: AuthenticatedRequest, res: Response, next: NextFunction): void {
@@ -64,5 +66,14 @@ export function authMiddleware(req: AuthenticatedRequest, res: Response, next: N
     return
   }
   req.userId = payload.userId
+  req.isMaster = payload.isMaster ?? false
+  next()
+}
+
+export function masterMiddleware(req: AuthenticatedRequest, res: Response, next: NextFunction): void {
+  if (!req.isMaster) {
+    res.status(403).json({ error: 'Acesso negado: requer privilégios de Administrador Master.' })
+    return
+  }
   next()
 }

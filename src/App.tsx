@@ -8,12 +8,13 @@ import { AuthScreen } from './components/AuthScreen'
 import { TeamModal } from './components/TeamModal'
 import { ProfileModal } from './components/ProfileModal'
 import { NewTeamModal } from './components/NewTeamModal'
+import { AdminModal } from './components/AdminModal'
 import { Avatar } from './components/Avatar'
 import { computeLayout, computeRange } from './lib/layout'
 import { todayDay } from './lib/dates'
 import { moveTask, removeTask, upsertTask } from './lib/tasks'
 import { exportChartToPng, type ExportConfig } from './lib/exportPng'
-import { api, getToken, setToken, getStoredActiveTeamId, setStoredActiveTeamId, type AuthResponse } from './lib/api'
+import { api, getToken, setToken, getStoredActiveTeamId, setStoredActiveTeamId, isImpersonating, type AuthResponse } from './lib/api'
 import { STATUS_STYLE } from './theme'
 
 const ZOOM_LEVELS = [5, 8, 12, 18, 28, 40, 60]
@@ -42,6 +43,8 @@ export default function App() {
   const [teamModalOpen, setTeamModalOpen] = useState(false)
   const [profileModalOpen, setProfileModalOpen] = useState(false)
   const [newTeamModalOpen, setNewTeamModalOpen] = useState(false)
+  const [adminModalOpen, setAdminModalOpen] = useState(false)
+  const [impersonating, setImpersonating] = useState(isImpersonating())
   const [teamDropdownOpen, setTeamDropdownOpen] = useState(false)
   const [userMenuOpen, setUserMenuOpen] = useState(false)
 
@@ -64,6 +67,7 @@ export default function App() {
           : res.activeTeamId ?? res.teams[0]?.id ?? null
         setActiveTeamId(targetTeamId)
         setStoredActiveTeamId(targetTeamId)
+        setImpersonating(isImpersonating())
       } catch {
         api.logout()
         setCurrentUser(null)
@@ -102,6 +106,7 @@ export default function App() {
     const targetTeamId = data.activeTeamId ?? data.teams[0]?.id ?? null
     setActiveTeamId(targetTeamId)
     setStoredActiveTeamId(targetTeamId)
+    setImpersonating(isImpersonating())
   }
 
   const handleLogout = () => {
@@ -113,6 +118,31 @@ export default function App() {
     setTeamUsers([])
     setUserMenuOpen(false)
     setTeamDropdownOpen(false)
+    setImpersonating(false)
+  }
+
+  const handleImpersonateUser = (user: User, userTeams: Team[], teamId: string | null) => {
+    setCurrentUser(user)
+    setTeams(userTeams)
+    setActiveTeamId(teamId)
+    setStoredActiveTeamId(teamId)
+    setImpersonating(true)
+    setAdminModalOpen(false)
+    setSelectedId(null)
+  }
+
+  const handleRevertImpersonation = async () => {
+    try {
+      const res = await api.revertImpersonation()
+      setCurrentUser(res.user)
+      setTeams(res.teams)
+      setActiveTeamId(res.activeTeamId)
+      setStoredActiveTeamId(res.activeTeamId)
+      setImpersonating(false)
+      setSelectedId(null)
+    } catch (err) {
+      setError(`Falha ao retornar para a conta Master: ${(err as Error).message}`)
+    }
   }
 
   const handleSelectTeam = (teamId: string) => {
@@ -208,6 +238,24 @@ export default function App() {
 
   return (
     <div className="app">
+      {impersonating && (
+        <aside className="impersonation-banner" role="status" aria-live="polite">
+          <div className="impersonation-info">
+            <span className="impersonation-badge">⚠️ SUPORTE MASTER</span>
+            <span>
+              Você está acessando a conta de <strong>{currentUser.name}</strong> ({currentUser.email}).
+            </span>
+          </div>
+          <button
+            type="button"
+            className="btn btn-sm impersonation-revert-btn"
+            onClick={handleRevertImpersonation}
+          >
+            🛡️ Voltar para Administrador Master
+          </button>
+        </aside>
+      )}
+
       <header className="topbar">
         {/* Marca e Seleção de Equipe */}
         <div className="brand-group">
@@ -301,6 +349,16 @@ export default function App() {
 
         {/* Ações Rápidas */}
         <div className="actions">
+          {currentUser.isMaster && (
+            <button
+              type="button"
+              className="btn master-btn"
+              onClick={() => setAdminModalOpen(true)}
+              title="Painel Administrativo Master: Gerenciar usuários, alterar senhas e acessar contas"
+            >
+              🛡️ Painel Master
+            </button>
+          )}
           <button type="button" className="btn" onClick={() => setTodayToken((n) => n + 1)}>Hoje</button>
           <button type="button" className="btn" onClick={() => setEditing({ task: null })} disabled={loading}>+ Nova tarefa</button>
           <button type="button" className="btn primary" onClick={() => setExportModalOpen(true)} disabled={loading}>
@@ -324,16 +382,32 @@ export default function App() {
           >
             <Avatar user={currentUser} size={30} />
             <span className="user-name-text">{currentUser.name.split(' ')[0]}</span>
+            {currentUser.isMaster && <span className="master-indicator-dot" title="Administrador Master" />}
             <span className="dropdown-caret">▾</span>
           </button>
 
           {userMenuOpen && (
             <div className="dropdown-menu user-menu" onMouseLeave={() => setUserMenuOpen(false)}>
               <div className="user-menu-header">
-                <strong>{currentUser.name}</strong>
+                <div className="user-menu-name-row">
+                  <strong>{currentUser.name}</strong>
+                  {currentUser.isMaster && <span className="role-tag master-tag">Master</span>}
+                </div>
                 <span className="user-menu-email">{currentUser.email}</span>
               </div>
               <div className="dropdown-divider" />
+              {currentUser.isMaster && (
+                <button
+                  type="button"
+                  className="dropdown-item master-menu-item"
+                  onClick={() => {
+                    setUserMenuOpen(false)
+                    setAdminModalOpen(true)
+                  }}
+                >
+                  🛡️ Painel Master
+                </button>
+              )}
               <button
                 type="button"
                 className="dropdown-item"
@@ -465,6 +539,14 @@ export default function App() {
         <NewTeamModal
           onClose={() => setNewTeamModalOpen(false)}
           onTeamCreated={handleTeamCreated}
+        />
+      )}
+
+      {adminModalOpen && (
+        <AdminModal
+          currentUserId={currentUser.id}
+          onClose={() => setAdminModalOpen(false)}
+          onImpersonate={handleImpersonateUser}
         />
       )}
     </div>

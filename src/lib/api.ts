@@ -1,4 +1,4 @@
-import type { Task, User, Team } from '../types'
+import type { Task, User, Team, AdminUser } from '../types'
 
 export interface ChartState {
   team?: Team | null
@@ -15,6 +15,15 @@ export interface AuthResponse {
 
 const TOKEN_KEY = 'gantt_auth_token'
 const ACTIVE_TEAM_KEY = 'gantt_active_team_id'
+const MASTER_BACKUP_TOKEN_KEY = 'gantt_master_backup_token'
+
+export function isImpersonating(): boolean {
+  return !!localStorage.getItem(MASTER_BACKUP_TOKEN_KEY)
+}
+
+export function getMasterBackupToken(): string | null {
+  return localStorage.getItem(MASTER_BACKUP_TOKEN_KEY)
+}
 
 export function getToken(): string | null {
   return localStorage.getItem(TOKEN_KEY)
@@ -53,6 +62,7 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 
   if (res.status === 401) {
     // Se o token for inválido/expirado, remove do storage
+    localStorage.removeItem(MASTER_BACKUP_TOKEN_KEY)
     setToken(null)
   }
 
@@ -100,7 +110,50 @@ export const api = {
     }),
 
   logout: () => {
+    localStorage.removeItem(MASTER_BACKUP_TOKEN_KEY)
     setToken(null)
+  },
+
+  // Administração (Master)
+  getAdminUsers: () => request<AdminUser[]>('/api/admin/users'),
+
+  adminChangePassword: (userId: string, newPassword: string) =>
+    request<{ message: string }>(`/api/admin/users/${userId}/password`, {
+      method: 'PUT',
+      body: JSON.stringify({ newPassword }),
+    }),
+
+  adminUpdateUser: (userId: string, data: { name?: string; email?: string; color?: string; isMaster?: boolean }) =>
+    request<{ user: User }>(`/api/admin/users/${userId}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+
+  adminImpersonate: async (userId: string) => {
+    const currentToken = getToken()
+    const res = await request<AuthResponse>(`/api/admin/impersonate/${userId}`, {
+      method: 'POST',
+    })
+    // Salva o token do master se ainda não estiver salvo
+    if (currentToken && !localStorage.getItem(MASTER_BACKUP_TOKEN_KEY)) {
+      localStorage.setItem(MASTER_BACKUP_TOKEN_KEY, currentToken)
+    }
+    setToken(res.token)
+    return res
+  },
+
+  revertImpersonation: async () => {
+    const masterToken = localStorage.getItem(MASTER_BACKUP_TOKEN_KEY)
+    if (!masterToken) throw new Error('Nenhuma sessão master para restaurar.')
+    localStorage.removeItem(MASTER_BACKUP_TOKEN_KEY)
+    setToken(masterToken)
+    const res = await request<{ user: User; teams: Team[]; activeTeamId: string | null }>('/api/auth/me')
+    return {
+      token: masterToken,
+      user: res.user,
+      teams: res.teams,
+      activeTeamId: res.activeTeamId,
+    } as AuthResponse
   },
 
   // Equipes

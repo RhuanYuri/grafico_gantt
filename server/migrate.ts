@@ -10,6 +10,13 @@ export const DEFAULT_PASSWORD = '12345678'
 export const DEFAULT_TEAM_ID = 'team-arq-comp'
 export const DEFAULT_TEAM_NAME = 'Arquitetura de Computadores'
 
+export const MASTER_USER = {
+  id: 'master',
+  name: 'Administrador Master',
+  email: 'admin@ufma.br',
+  color: '#0f172a',
+}
+
 export const DEFAULT_USER_EMAILS: Record<string, string> = {
   cf: 'caio@ufma.br',
   dl: 'danilo@ufma.br',
@@ -67,10 +74,11 @@ export async function migrate(pool: pg.Pool): Promise<void> {
       );
     `)
 
-    // 2. Colunas de autenticação em users
+    // 2. Colunas de autenticação e papel master em users
     await client.query(`
       ALTER TABLE users ADD COLUMN IF NOT EXISTS email text;
       ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash text;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS is_master boolean NOT NULL DEFAULT false;
       ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at timestamptz DEFAULT NOW();
     `)
 
@@ -100,6 +108,19 @@ export async function migrate(pool: pg.Pool): Promise<void> {
       )
     }
 
+    // 6. Criar ou atualizar usuário master com privilégios administrativos
+    const masterPassword = process.env.MASTER_PASSWORD || DEFAULT_PASSWORD
+    const masterHash = hashPassword(masterPassword)
+    await client.query(
+      `INSERT INTO users (id, name, email, color, password_hash, is_master)
+       VALUES ($1, $2, $3, $4, $5, true)
+       ON CONFLICT (id) DO UPDATE
+       SET is_master = true,
+           password_hash = COALESCE(users.password_hash, EXCLUDED.password_hash),
+           email = COALESCE(users.email, EXCLUDED.email)`,
+      [MASTER_USER.id, MASTER_USER.name, MASTER_USER.email, MASTER_USER.color, masterHash],
+    )
+
     // Qualquer outro usuário que não tenha e-mail ou senha ganha fallback seguro
     await client.query(
       `UPDATE users
@@ -113,12 +134,12 @@ export async function migrate(pool: pg.Pool): Promise<void> {
       [defaultHash],
     )
 
-    // 6. Criar índice único para o e-mail (garantindo que seja único no sistema)
+    // 7. Criar índice único para o e-mail (garantindo que seja único no sistema)
     await client.query(`
       CREATE UNIQUE INDEX IF NOT EXISTS users_email_unique_idx ON users(LOWER(email));
     `)
 
-    // 7. Associar todos os usuários existentes à equipe "Arquitetura de Computadores"
+    // 8. Associar todos os usuários existentes à equipe "Arquitetura de Computadores"
     await client.query(`
       INSERT INTO team_members (team_id, user_id, role)
       SELECT $1, id, 'member'
@@ -126,7 +147,12 @@ export async function migrate(pool: pg.Pool): Promise<void> {
       ON CONFLICT (team_id, user_id) DO NOTHING;
     `, [DEFAULT_TEAM_ID])
 
-    // 8. Associar todas as tarefas legadas que estejam sem equipe para "Arquitetura de Computadores"
+    // Garantir que o master tenha papel owner na equipe padrão
+    await client.query(`
+      UPDATE team_members SET role = 'owner' WHERE team_id = $1 AND user_id = $2;
+    `, [DEFAULT_TEAM_ID, MASTER_USER.id])
+
+    // 9. Associar todas as tarefas legadas que estejam sem equipe para "Arquitetura de Computadores"
     await client.query(
       `UPDATE tasks
        SET team_id = $1
@@ -140,7 +166,7 @@ export async function migrate(pool: pg.Pool): Promise<void> {
     `)
 
     await client.query('COMMIT')
-    console.log('✓ Migração concluída com sucesso: Dados e tarefas vinculados à equipe "Arquitetura de Computadores".')
+    console.log('✓ Migração concluída com sucesso: Dados, tarefas e usuário master configurados.')
   } catch (err) {
     await client.query('ROLLBACK')
     throw err

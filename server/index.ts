@@ -3,9 +3,9 @@ import pg from 'pg'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { Task, TaskStatus, User, Team } from '../src/types'
+import type { Task, TaskStatus, User, Team, AdminUser } from '../src/types'
 import { SEED_TASKS, SEED_USERS } from './seed'
-import { authMiddleware, hashPassword, signToken, verifyPassword, verifyToken, type AuthenticatedRequest } from './auth'
+import { authMiddleware, masterMiddleware, hashPassword, signToken, verifyPassword, verifyToken, type AuthenticatedRequest } from './auth'
 import { migrate, DEFAULT_TEAM_ID, DEFAULT_TEAM_NAME, DEFAULT_PASSWORD } from './migrate'
 
 const pool = new pg.Pool({
@@ -278,7 +278,7 @@ async function main() {
 
     const cleanEmail = email.trim().toLowerCase()
     const { rows } = await pool.query(
-      `SELECT id, name, email, color, avatar_url, password_hash
+      `SELECT id, name, email, color, avatar_url, password_hash, is_master
        FROM users
        WHERE LOWER(email) = $1`,
       [cleanEmail],
@@ -293,12 +293,13 @@ async function main() {
       return void res.status(401).json({ error: 'Credenciais inválidas: senha incorreta.' })
     }
 
-    const token = signToken({ userId: u.id })
+    const token = signToken({ userId: u.id, isMaster: u.is_master ?? false })
     const user: User = {
       id: u.id,
       name: u.name,
       email: u.email,
       color: u.color,
+      isMaster: u.is_master ?? false,
       ...(u.avatar_url ? { avatarUrl: u.avatar_url } : {}),
     }
 
@@ -312,7 +313,7 @@ async function main() {
   app.get('/api/auth/me', authMiddleware, wrap(async (req: AuthenticatedRequest, res) => {
     const userId = req.userId!
     const { rows } = await pool.query(
-      'SELECT id, name, email, color, avatar_url FROM users WHERE id = $1',
+      'SELECT id, name, email, color, avatar_url, is_master FROM users WHERE id = $1',
       [userId],
     )
     if (rows.length === 0) return void res.status(404).json({ error: 'Usuário não encontrado.' })
@@ -323,6 +324,7 @@ async function main() {
       name: u.name,
       email: u.email ?? '',
       color: u.color,
+      isMaster: u.is_master ?? false,
       ...(u.avatar_url ? { avatarUrl: u.avatar_url } : {}),
     }
     const teams = await getUserTeams(userId)
@@ -380,7 +382,7 @@ async function main() {
       await pool.query(`UPDATE users SET ${updates.join(', ')} WHERE id = $${pIndex}`, values)
     }
 
-    const updatedRes = await pool.query('SELECT id, name, email, color, avatar_url FROM users WHERE id = $1', [userId])
+    const updatedRes = await pool.query('SELECT id, name, email, color, avatar_url, is_master FROM users WHERE id = $1', [userId])
     const u = updatedRes.rows[0]
     res.json({
       user: {
@@ -388,9 +390,168 @@ async function main() {
         name: u.name,
         email: u.email ?? '',
         color: u.color,
+        isMaster: u.is_master ?? false,
         ...(u.avatar_url ? { avatarUrl: u.avatar_url } : {}),
       },
     })
+  }))
+
+  // -------------------------------------------------------------
+  // ROTAS ADMINISTRATIVAS (EXCLUSIVAS DO USUÁRIO MASTER)
+  // -------------------------------------------------------------
+
+  // Listar todos os usuários do sistema com equipes e estatísticas
+  app.get('/api/admin/users', authMiddleware, masterMiddleware, wrap(async (_req: AuthenticatedRequest, res) => {
+    const { rows } = await pool.query(`
+      SELECT u.id, u.name, u.email, u.color, u.avatar_url, u.is_master AS "isMaster",
+             to_char(u.created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS "createdAt",
+             (SELECT count(*)::int FROM team_members WHERE user_id = u.id) AS "teamCount",
+             COALESCE(
+               (
+                 SELECT json_agg(
+                   json_build_object('id', t.id, 'name', t.name, 'role', tm.role)
+                 )
+                 FROM team_members tm
+                 JOIN teams t ON tm.team_id = t.id
+                 WHERE tm.user_id = u.id
+               ),
+               '[]'::json
+             ) AS teams
+      FROM users u
+      ORDER BY u.is_master DESC, u.name ASC
+    `)
+
+    const users: AdminUser[] = rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      email: r.email ?? '',
+      color: r.color,
+      isMaster: r.isMaster ?? false,
+      createdAt: r.createdAt,
+      teamCount: r.teamCount ?? 0,
+      teams: r.teams ?? [],
+      ...(r.avatar_url ? { avatarUrl: r.avatar_url } : {}),
+    }))
+
+    res.json(users)
+  }))
+
+  // Alterar senha de qualquer usuário diretamente (pelo Administrador Master)
+  app.put('/api/admin/users/:userId/password', authMiddleware, masterMiddleware, wrap(async (req: AuthenticatedRequest, res) => {
+    const targetUserId = String(req.params.userId)
+    const { newPassword } = req.body ?? {}
+
+    if (!newPassword || typeof newPassword !== 'string' || newPassword.length < 6) {
+      return void res.status(400).json({ error: 'A nova senha deve conter pelo menos 6 caracteres.' })
+    }
+
+    const check = await pool.query('SELECT id, name, email FROM users WHERE id = $1', [targetUserId])
+    if (check.rowCount === 0) {
+      return void res.status(404).json({ error: 'Usuário não encontrado.' })
+    }
+
+    const newHash = hashPassword(newPassword)
+    await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [newHash, targetUserId])
+
+    res.json({
+      message: `Senha do usuário ${check.rows[0].name} (${check.rows[0].email}) alterada com sucesso!`,
+    })
+  }))
+
+  // Atualizar dados cadastrais de um usuário pelo Administrador Master
+  app.put('/api/admin/users/:userId', authMiddleware, masterMiddleware, wrap(async (req: AuthenticatedRequest, res) => {
+    const targetUserId = String(req.params.userId)
+    const { name, email, color, isMaster } = req.body ?? {}
+
+    const check = await pool.query('SELECT id, email, is_master FROM users WHERE id = $1', [targetUserId])
+    if (check.rowCount === 0) {
+      return void res.status(404).json({ error: 'Usuário não encontrado.' })
+    }
+
+    if (email && typeof email === 'string') {
+      const cleanEmail = email.trim().toLowerCase()
+      if (!cleanEmail.includes('@')) {
+        return void res.status(400).json({ error: 'Formato de e-mail inválido.' })
+      }
+      const conflict = await pool.query(
+        'SELECT id FROM users WHERE LOWER(email) = $1 AND id <> $2',
+        [cleanEmail, targetUserId],
+      )
+      if ((conflict.rowCount ?? 0) > 0) {
+        return void res.status(400).json({ error: 'Este e-mail já está em uso por outro usuário.' })
+      }
+    }
+
+    const updates: string[] = []
+    const values: unknown[] = []
+    let pIndex = 1
+
+    if (name && typeof name === 'string' && name.trim()) {
+      updates.push(`name = $${pIndex++}`)
+      values.push(name.trim())
+    }
+    if (email && typeof email === 'string' && email.trim()) {
+      updates.push(`email = $${pIndex++}`)
+      values.push(email.trim().toLowerCase())
+    }
+    if (color && typeof color === 'string' && color.trim()) {
+      updates.push(`color = $${pIndex++}`)
+      values.push(color.trim())
+    }
+    if (typeof isMaster === 'boolean') {
+      updates.push(`is_master = $${pIndex++}`)
+      values.push(isMaster)
+    }
+
+    if (updates.length > 0) {
+      values.push(targetUserId)
+      await pool.query(`UPDATE users SET ${updates.join(', ')} WHERE id = $${pIndex}`, values)
+    }
+
+    const updated = await pool.query(
+      'SELECT id, name, email, color, avatar_url, is_master AS "isMaster" FROM users WHERE id = $1',
+      [targetUserId],
+    )
+    const u = updated.rows[0]
+    res.json({
+      user: {
+        id: u.id,
+        name: u.name,
+        email: u.email ?? '',
+        color: u.color,
+        isMaster: u.isMaster ?? false,
+        ...(u.avatar_url ? { avatarUrl: u.avatar_url } : {}),
+      },
+    })
+  }))
+
+  // Acessar a conta de qualquer usuário (Impersonation / Suporte Master)
+  app.post('/api/admin/impersonate/:userId', authMiddleware, masterMiddleware, wrap(async (_req: AuthenticatedRequest, res) => {
+    const targetUserId = String(_req.params.userId)
+
+    const userRes = await pool.query(
+      'SELECT id, name, email, color, avatar_url, is_master FROM users WHERE id = $1',
+      [targetUserId],
+    )
+    if (userRes.rowCount === 0) {
+      return void res.status(404).json({ error: 'Usuário de destino não encontrado.' })
+    }
+
+    const u = userRes.rows[0]
+    const token = signToken({ userId: u.id, isMaster: u.is_master ?? false })
+    const user: User = {
+      id: u.id,
+      name: u.name,
+      email: u.email ?? '',
+      color: u.color,
+      isMaster: u.is_master ?? false,
+      ...(u.avatar_url ? { avatarUrl: u.avatar_url } : {}),
+    }
+
+    const teams = await getUserTeams(u.id)
+    const activeTeamId = teams.find((t) => t.id === DEFAULT_TEAM_ID)?.id ?? teams[0]?.id ?? null
+
+    res.json({ token, user, teams, activeTeamId })
   }))
 
   // -------------------------------------------------------------

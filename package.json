@@ -13,6 +13,7 @@
     "start": "node dist/server.js",
     "db:up": "docker compose up -d db",
     "db:down": "docker compose down",
+    "db:migrate": "tsx server/migrate.ts",
     "preview": "vite preview"
   },
   "dependencies": {

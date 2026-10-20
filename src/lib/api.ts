@@ -1,22 +1,150 @@
-import type { Task, User } from '../types'
+import type { Task, User, Team } from '../types'
 
 export interface ChartState {
+  team?: Team | null
   users: User[]
   tasks: Task[]
 }
 
+export interface AuthResponse {
+  token: string
+  user: User
+  teams: Team[]
+  activeTeamId: string | null
+}
+
+const TOKEN_KEY = 'gantt_auth_token'
+const ACTIVE_TEAM_KEY = 'gantt_active_team_id'
+
+export function getToken(): string | null {
+  return localStorage.getItem(TOKEN_KEY)
+}
+
+export function setToken(token: string | null): void {
+  if (token) localStorage.setItem(TOKEN_KEY, token)
+  else localStorage.removeItem(TOKEN_KEY)
+}
+
+export function getStoredActiveTeamId(): string | null {
+  return localStorage.getItem(ACTIVE_TEAM_KEY)
+}
+
+export function setStoredActiveTeamId(teamId: string | null): void {
+  if (teamId) localStorage.setItem(ACTIVE_TEAM_KEY, teamId)
+  else localStorage.removeItem(ACTIVE_TEAM_KEY)
+}
+
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
+  const token = getToken()
+  const headers = new Headers(init?.headers)
+
+  if (init?.body && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json')
+  }
+
+  if (token && !headers.has('Authorization')) {
+    headers.set('Authorization', `Bearer ${token}`)
+  }
+
   const res = await fetch(url, {
     ...init,
-    headers: init?.body ? { 'Content-Type': 'application/json' } : undefined,
+    headers,
   })
-  if (!res.ok) throw new Error(`API respondeu ${res.status}`)
+
+  if (res.status === 401) {
+    // Se o token for inválido/expirado, remove do storage
+    setToken(null)
+  }
+
+  if (!res.ok) {
+    let errorMsg = `Erro na requisição (${res.status})`
+    try {
+      const data = await res.json()
+      if (data && data.error) errorMsg = data.error
+    } catch {
+      // Se não for JSON, usa mensagem genérica
+    }
+    throw new Error(errorMsg)
+  }
+
   return res.status === 204 ? (undefined as T) : ((await res.json()) as T)
 }
 
 export const api = {
-  getState: () => request<ChartState>('/api/state'),
-  saveTask: (task: Task) => request<Task>(`/api/tasks/${task.id}`, { method: 'PUT', body: JSON.stringify(task) }),
-  deleteTask: (id: string) => request<void>(`/api/tasks/${id}`, { method: 'DELETE' }),
-  reset: () => request<ChartState>('/api/reset', { method: 'POST' }),
+  // Autenticação
+  login: async (email: string, password: string) => {
+    const res = await request<AuthResponse>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ email, password }),
+    })
+    setToken(res.token)
+    return res
+  },
+
+  register: async (name: string, email: string, password: string, color?: string) => {
+    const res = await request<AuthResponse>('/api/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({ name, email, password, color }),
+    })
+    setToken(res.token)
+    return res
+  },
+
+  getMe: () =>
+    request<{ user: User; teams: Team[]; activeTeamId: string | null }>('/api/auth/me'),
+
+  updateProfile: (data: { name?: string; email?: string; color?: string; password?: string }) =>
+    request<{ user: User }>('/api/auth/profile', {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+
+  logout: () => {
+    setToken(null)
+  },
+
+  // Equipes
+  getTeams: () => request<Team[]>('/api/teams'),
+
+  createTeam: (name: string) =>
+    request<Team>('/api/teams', {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    }),
+
+  getTeamMembers: (teamId: string) =>
+    request<User[]>(`/api/teams/${teamId}/members`),
+
+  addTeamMember: (teamId: string, email: string) =>
+    request<{ message: string; addedUser: User; members: User[] }>(`/api/teams/${teamId}/members`, {
+      method: 'POST',
+      body: JSON.stringify({ email }),
+    }),
+
+  removeTeamMember: (teamId: string, userId: string) =>
+    request<void>(`/api/teams/${teamId}/members/${userId}`, {
+      method: 'DELETE',
+    }),
+
+  // Tarefas e Gráfico
+  getTeamState: (teamId: string) =>
+    request<ChartState>(`/api/teams/${teamId}/state`),
+
+  getState: (teamId?: string) =>
+    request<ChartState>(teamId ? `/api/teams/${teamId}/state` : '/api/state'),
+
+  saveTask: (task: Task, teamId?: string) =>
+    request<Task>(`/api/tasks/${task.id}`, {
+      method: 'PUT',
+      body: JSON.stringify({ ...task, teamId }),
+    }),
+
+  deleteTask: (id: string) =>
+    request<void>(`/api/tasks/${id}`, { method: 'DELETE' }),
+
+  resetTeam: (teamId: string) =>
+    request<ChartState>(`/api/teams/${teamId}/reset`, { method: 'POST' }),
+
+  reset: () =>
+    request<ChartState>('/api/reset', { method: 'POST' }),
 }

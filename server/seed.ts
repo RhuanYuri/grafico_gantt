@@ -13,11 +13,11 @@ import type { Task, User } from '../src/types'
  *  - Emissão do TEP depende de ambos (encerramento)
  */
 export const SEED_USERS: User[] = [
-  { id: 'cf', name: 'Caio Ferreira Sousa', color: '#2f6fe0' },
-  { id: 'dl', name: 'Danilo Nava Soares Lima', color: '#7b4fd6' },
-  { id: 'ra', name: 'Raynara Ribeiro Alves', color: '#e8772e' },
-  { id: 'rs', name: 'Rhuã Yuri Nascimento Sardinha', color: '#14919b' },
-  { id: 'yg', name: 'Yuri Aguiar Gonçalves', color: '#c2417a' },
+  { id: 'cf', name: 'Caio Ferreira Sousa', email: 'caio@ufma.br', color: '#2f6fe0' },
+  { id: 'dl', name: 'Danilo Nava Soares Lima', email: 'danilo@ufma.br', color: '#7b4fd6' },
+  { id: 'ra', name: 'Raynara Ribeiro Alves', email: 'raynara@ufma.br', color: '#e8772e' },
+  { id: 'rs', name: 'Rhuã Yuri Nascimento Sardinha', email: 'rhuan@ufma.br', color: '#14919b' },
+  { id: 'yg', name: 'Yuri Aguiar Gonçalves', email: 'yuri@ufma.br', color: '#c2417a' },
 ]
 
 function t(
@@ -32,6 +32,7 @@ function t(
 ): Task {
   return {
     id,
+    teamId: 'team-arq-comp',
     title,
     description,
     start,

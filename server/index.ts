@@ -3,73 +3,14 @@ import pg from 'pg'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { Task, TaskStatus, User } from '../src/types'
+import type { Task, TaskStatus, User, Team } from '../src/types'
 import { SEED_TASKS, SEED_USERS } from './seed'
+import { authMiddleware, hashPassword, signToken, verifyPassword, verifyToken, type AuthenticatedRequest } from './auth'
+import { migrate, DEFAULT_TEAM_ID, DEFAULT_TEAM_NAME, DEFAULT_PASSWORD } from './migrate'
 
 const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL ?? 'postgres://gantt:gantt@localhost:5433/gantt',
 })
-
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS users (
-  id         text PRIMARY KEY,
-  name       text NOT NULL,
-  color      text NOT NULL,
-  avatar_url text
-);
-CREATE TABLE IF NOT EXISTS tasks (
-  id          text PRIMARY KEY,
-  title       text NOT NULL,
-  description text NOT NULL DEFAULT '',
-  start_date  date NOT NULL,
-  end_date    date NOT NULL,
-  status      text NOT NULL CHECK (status IN ('pending','in_progress','done')),
-  position    serial,
-  CHECK (end_date >= start_date)
-);
-CREATE TABLE IF NOT EXISTS task_assignees (
-  task_id text NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  PRIMARY KEY (task_id, user_id)
-);
-CREATE TABLE IF NOT EXISTS task_dependencies (
-  task_id        text NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-  predecessor_id text NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-  type           text NOT NULL DEFAULT 'FS',
-  PRIMARY KEY (task_id, predecessor_id),
-  CHECK (task_id <> predecessor_id)
-);
-`
-
-async function insertTask(c: pg.PoolClient, t: Task) {
-  await c.query(
-    `INSERT INTO tasks (id, title, description, start_date, end_date, status)
-     VALUES ($1,$2,$3,$4,$5,$6)
-     ON CONFLICT (id) DO UPDATE SET title=$2, description=$3, start_date=$4, end_date=$5, status=$6`,
-    [t.id, t.title, t.description, t.start, t.end, t.status],
-  )
-}
-
-async function setRelations(c: pg.PoolClient, t: Task) {
-  await c.query('DELETE FROM task_assignees WHERE task_id=$1', [t.id])
-  await c.query('DELETE FROM task_dependencies WHERE task_id=$1', [t.id])
-  for (const u of t.assigneeIds) {
-    await c.query('INSERT INTO task_assignees (task_id, user_id) VALUES ($1,$2)', [t.id, u])
-  }
-  for (const p of t.predecessors) {
-    await c.query('INSERT INTO task_dependencies (task_id, predecessor_id, type) VALUES ($1,$2,$3)', [t.id, p.taskId, p.type])
-  }
-}
-
-async function seed(c: pg.PoolClient) {
-  await c.query('TRUNCATE task_dependencies, task_assignees, tasks, users RESTART IDENTITY CASCADE')
-  for (const u of SEED_USERS) {
-    await c.query('INSERT INTO users (id,name,color,avatar_url) VALUES ($1,$2,$3,$4)', [u.id, u.name, u.color, u.avatarUrl ?? null])
-  }
-  // tarefas primeiro, relações depois (as FKs exigem que todas existam)
-  for (const t of SEED_TASKS) await insertTask(c, t)
-  for (const t of SEED_TASKS) await setRelations(c, t)
-}
 
 async function tx<T>(fn: (c: pg.PoolClient) => Promise<T>): Promise<T> {
   const c = await pool.connect()
@@ -86,19 +27,100 @@ async function tx<T>(fn: (c: pg.PoolClient) => Promise<T>): Promise<T> {
   }
 }
 
-async function readState(): Promise<{ users: User[]; tasks: Task[] }> {
-  const users = await pool.query('SELECT id, name, color, avatar_url FROM users ORDER BY name')
-  const tasks = await pool.query(
-    `SELECT id, title, description, to_char(start_date,'YYYY-MM-DD') AS start,
-            to_char(end_date,'YYYY-MM-DD') AS "end", status
-     FROM tasks ORDER BY position`,
+async function getUserTeams(userId: string): Promise<Team[]> {
+  const res = await pool.query(
+    `SELECT t.id, t.name, tm.role,
+            (SELECT count(*)::int FROM team_members WHERE team_id = t.id) AS "memberCount",
+            t.created_at AS "createdAt"
+     FROM teams t
+     JOIN team_members tm ON t.id = tm.team_id
+     WHERE tm.user_id = $1
+     ORDER BY t.name`,
+    [userId],
   )
-  const assignees = await pool.query('SELECT task_id, user_id FROM task_assignees')
-  const deps = await pool.query('SELECT task_id, predecessor_id, type FROM task_dependencies')
+  return res.rows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    role: r.role as 'owner' | 'member',
+    memberCount: r.memberCount,
+    createdAt: r.createdAt ? new Date(r.createdAt).toISOString() : undefined,
+  }))
+}
+
+async function isTeamMember(teamId: string, userId: string): Promise<boolean> {
+  const res = await pool.query(
+    'SELECT 1 FROM team_members WHERE team_id = $1 AND user_id = $2',
+    [teamId, userId],
+  )
+  return (res.rowCount ?? 0) > 0
+}
+
+async function insertTask(c: pg.PoolClient, t: Task, teamId: string) {
+  await c.query(
+    `INSERT INTO tasks (id, team_id, title, description, start_date, end_date, status)
+     VALUES ($1,$2,$3,$4,$5,$6,$7)
+     ON CONFLICT (id) DO UPDATE SET title=$3, description=$4, start_date=$5, end_date=$6, status=$7, team_id=$2`,
+    [t.id, teamId, t.title, t.description, t.start, t.end, t.status],
+  )
+}
+
+async function setRelations(c: pg.PoolClient, t: Task) {
+  await c.query('DELETE FROM task_assignees WHERE task_id=$1', [t.id])
+  await c.query('DELETE FROM task_dependencies WHERE task_id=$1', [t.id])
+  for (const u of t.assigneeIds) {
+    await c.query('INSERT INTO task_assignees (task_id, user_id) VALUES ($1,$2)', [t.id, u])
+  }
+  for (const p of t.predecessors) {
+    await c.query('INSERT INTO task_dependencies (task_id, predecessor_id, type) VALUES ($1,$2,$3)', [t.id, p.taskId, p.type])
+  }
+}
+
+async function readTeamState(teamId: string): Promise<{ team: Team | null; users: User[]; tasks: Task[] }> {
+  const teamRes = await pool.query('SELECT id, name FROM teams WHERE id = $1', [teamId])
+  const team = teamRes.rows[0] ? { id: teamRes.rows[0].id, name: teamRes.rows[0].name } : null
+
+  const users = await pool.query(
+    `SELECT u.id, u.name, u.email, u.color, u.avatar_url
+     FROM users u
+     JOIN team_members tm ON u.id = tm.user_id
+     WHERE tm.team_id = $1
+     ORDER BY u.name`,
+    [teamId],
+  )
+  const tasks = await pool.query(
+    `SELECT id, team_id, title, description, to_char(start_date,'YYYY-MM-DD') AS start,
+            to_char(end_date,'YYYY-MM-DD') AS "end", status
+     FROM tasks
+     WHERE team_id = $1
+     ORDER BY position`,
+    [teamId],
+  )
+  const assignees = await pool.query(
+    `SELECT ta.task_id, ta.user_id
+     FROM task_assignees ta
+     JOIN tasks t ON ta.task_id = t.id
+     WHERE t.team_id = $1`,
+    [teamId],
+  )
+  const deps = await pool.query(
+    `SELECT td.task_id, td.predecessor_id, td.type
+     FROM task_dependencies td
+     JOIN tasks t ON td.task_id = t.id
+     WHERE t.team_id = $1`,
+    [teamId],
+  )
   return {
-    users: users.rows.map((u) => ({ id: u.id, name: u.name, color: u.color, ...(u.avatar_url ? { avatarUrl: u.avatar_url } : {}) })),
+    team,
+    users: users.rows.map((u) => ({
+      id: u.id,
+      name: u.name,
+      email: u.email ?? '',
+      color: u.color,
+      ...(u.avatar_url ? { avatarUrl: u.avatar_url } : {}),
+    })),
     tasks: tasks.rows.map((r) => ({
       id: r.id,
+      teamId: r.team_id,
       title: r.title,
       description: r.description,
       start: r.start,
@@ -125,8 +147,44 @@ function validTask(b: unknown): b is Task {
   )
 }
 
+const PALETTE = ['#2f6fe0', '#7b4fd6', '#e8772e', '#14919b', '#c2417a', '#10b981', '#f59e0b', '#6366f1']
+
+async function resetDefaultTeam(c: pg.PoolClient) {
+  // Limpar apenas tarefas da equipe "Arquitetura de Computadores"
+  const taskIdsRes = await c.query("SELECT id FROM tasks WHERE team_id = 'team-arq-comp'")
+  const taskIds = taskIdsRes.rows.map((r) => r.id)
+  if (taskIds.length > 0) {
+    await c.query('DELETE FROM tasks WHERE team_id = $1', ['team-arq-comp'])
+  }
+  // Garantir que a equipe exista
+  await c.query(
+    `INSERT INTO teams (id, name) VALUES ('team-arq-comp', 'Arquitetura de Computadores')
+     ON CONFLICT (id) DO NOTHING`,
+  )
+  // Garantir que os usuários semente existam e façam parte da equipe
+  const defaultHash = hashPassword(DEFAULT_PASSWORD)
+  for (const u of SEED_USERS) {
+    await c.query(
+      `INSERT INTO users (id, name, email, color, avatar_url, password_hash)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (id) DO UPDATE
+       SET name = EXCLUDED.name, email = EXCLUDED.email, color = EXCLUDED.color`,
+      [u.id, u.name, u.email, u.color, u.avatarUrl ?? null, defaultHash],
+    )
+    await c.query(
+      `INSERT INTO team_members (team_id, user_id, role)
+       VALUES ('team-arq-comp', $1, 'member')
+       ON CONFLICT (team_id, user_id) DO NOTHING`,
+      [u.id],
+    )
+  }
+  // Inserir tarefas e relações
+  for (const t of SEED_TASKS) await insertTask(c, t, 'team-arq-comp')
+  for (const t of SEED_TASKS) await setRelations(c, t)
+}
+
 async function main() {
-  // Aguarda o banco ficar disponível (útil logo após `docker compose up`)
+  // Aguarda o banco ficar disponível (útil logo após docker compose up)
   for (let i = 0; ; i++) {
     try {
       await pool.query('SELECT 1')
@@ -136,9 +194,9 @@ async function main() {
       await new Promise((r) => setTimeout(r, 1000))
     }
   }
-  await pool.query(SCHEMA)
-  const { rows } = await pool.query('SELECT count(*)::int AS n FROM tasks')
-  if (rows[0].n === 0) await tx(seed)
+
+  // Executa migração idempotente (cria tabelas, colunas, equipes e migra dados sem perda)
+  await migrate(pool)
 
   const app = express()
   app.use(express.json())
@@ -148,31 +206,434 @@ async function main() {
     (req, res, next) =>
       Promise.resolve(fn(req, res, next)).catch(next)
 
-  app.get('/api/state', wrap(async (_req, res) => void res.json(await readState())))
+  // -------------------------------------------------------------
+  // ROTAS DE AUTENTICAÇÃO
+  // -------------------------------------------------------------
 
-  app.put('/api/tasks/:id', wrap(async (req, res) => {
-    const task = { ...req.body, id: req.params.id }
-    if (!validTask(task)) return void res.status(400).json({ error: 'Tarefa inválida' })
+  app.post('/api/auth/register', wrap(async (req, res) => {
+    const { name, email, password, color } = req.body ?? {}
+    if (!name || typeof name !== 'string' || !name.trim()) {
+      return void res.status(400).json({ error: 'O nome é obrigatório.' })
+    }
+    if (!email || typeof email !== 'string' || !email.includes('@')) {
+      return void res.status(400).json({ error: 'Um e-mail válido é obrigatório.' })
+    }
+    if (!password || typeof password !== 'string' || password.length < 6) {
+      return void res.status(400).json({ error: 'A senha deve conter pelo menos 6 caracteres.' })
+    }
+
+    const cleanEmail = email.trim().toLowerCase()
+    const cleanName = name.trim()
+
+    // Validação de unicidade de e-mail
+    const existing = await pool.query('SELECT id FROM users WHERE LOWER(email) = $1', [cleanEmail])
+    if ((existing.rowCount ?? 0) > 0) {
+      return void res.status(409).json({ error: 'Este e-mail já está em uso por outro usuário.' })
+    }
+
+    const userId = `u_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 6)}`
+    const userColor = color && typeof color === 'string' ? color : PALETTE[Math.floor(Math.random() * PALETTE.length)]
+    const passwordHash = hashPassword(password)
+
     await tx(async (c) => {
-      await insertTask(c, task)
-      await setRelations(c, task)
+      await c.query(
+        `INSERT INTO users (id, name, email, color, password_hash)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [userId, cleanName, cleanEmail, userColor, passwordHash],
+      )
+
+      // Criar uma equipe pessoal para o novo usuário
+      const teamId = `team_${userId}`
+      const teamName = `Equipe de ${cleanName.split(' ')[0]}`
+      await c.query(
+        `INSERT INTO teams (id, name) VALUES ($1, $2)`,
+        [teamId, teamName],
+      )
+      await c.query(
+        `INSERT INTO team_members (team_id, user_id, role) VALUES ($1, $2, 'owner')`,
+        [teamId, userId],
+      )
+      // Também adiciona o novo usuário como membro na equipe padrão "Arquitetura de Computadores" para facilitar colaboração
+      await c.query(
+        `INSERT INTO team_members (team_id, user_id, role)
+         VALUES ($1, $2, 'member')
+         ON CONFLICT (team_id, user_id) DO NOTHING`,
+        [DEFAULT_TEAM_ID, userId],
+      )
     })
-    res.json(task)
+
+    const token = signToken({ userId })
+    const user: User = { id: userId, name: cleanName, email: cleanEmail, color: userColor }
+    const teams = await getUserTeams(userId)
+    const activeTeamId = teams.find((t) => t.id === DEFAULT_TEAM_ID)?.id ?? teams[0]?.id ?? null
+
+    res.status(201).json({ token, user, teams, activeTeamId })
   }))
 
-  app.delete('/api/tasks/:id', wrap(async (req, res) => {
-    await pool.query('DELETE FROM tasks WHERE id=$1', [req.params.id])
+  app.post('/api/auth/login', wrap(async (req, res) => {
+    const { email, password } = req.body ?? {}
+    if (!email || !password) {
+      return void res.status(400).json({ error: 'E-mail e senha são obrigatórios.' })
+    }
+
+    const cleanEmail = email.trim().toLowerCase()
+    const { rows } = await pool.query(
+      `SELECT id, name, email, color, avatar_url, password_hash
+       FROM users
+       WHERE LOWER(email) = $1`,
+      [cleanEmail],
+    )
+
+    if (rows.length === 0) {
+      return void res.status(401).json({ error: 'Credenciais inválidas: e-mail não encontrado.' })
+    }
+
+    const u = rows[0]
+    if (!u.password_hash || !verifyPassword(password, u.password_hash)) {
+      return void res.status(401).json({ error: 'Credenciais inválidas: senha incorreta.' })
+    }
+
+    const token = signToken({ userId: u.id })
+    const user: User = {
+      id: u.id,
+      name: u.name,
+      email: u.email,
+      color: u.color,
+      ...(u.avatar_url ? { avatarUrl: u.avatar_url } : {}),
+    }
+
+    const teams = await getUserTeams(u.id)
+    // Dá preferência para a equipe 'team-arq-comp' se for membro, caso contrário a primeira
+    const activeTeamId = teams.find((t) => t.id === DEFAULT_TEAM_ID)?.id ?? teams[0]?.id ?? null
+
+    res.json({ token, user, teams, activeTeamId })
+  }))
+
+  app.get('/api/auth/me', authMiddleware, wrap(async (req: AuthenticatedRequest, res) => {
+    const userId = req.userId!
+    const { rows } = await pool.query(
+      'SELECT id, name, email, color, avatar_url FROM users WHERE id = $1',
+      [userId],
+    )
+    if (rows.length === 0) return void res.status(404).json({ error: 'Usuário não encontrado.' })
+
+    const u = rows[0]
+    const user: User = {
+      id: u.id,
+      name: u.name,
+      email: u.email ?? '',
+      color: u.color,
+      ...(u.avatar_url ? { avatarUrl: u.avatar_url } : {}),
+    }
+    const teams = await getUserTeams(userId)
+    const activeTeamId = teams.find((t) => t.id === DEFAULT_TEAM_ID)?.id ?? teams[0]?.id ?? null
+
+    res.json({ user, teams, activeTeamId })
+  }))
+
+  // Edição do perfil (inclusive e-mail com garantia de unicidade estrita)
+  app.put('/api/auth/profile', authMiddleware, wrap(async (req: AuthenticatedRequest, res) => {
+    const userId = req.userId!
+    const { name, email, color, password } = req.body ?? {}
+
+    const currentUserRes = await pool.query('SELECT id, email FROM users WHERE id = $1', [userId])
+    if (currentUserRes.rowCount === 0) return void res.status(404).json({ error: 'Usuário não encontrado.' })
+
+    if (email && typeof email === 'string') {
+      const cleanEmail = email.trim().toLowerCase()
+      if (!cleanEmail.includes('@')) {
+        return void res.status(400).json({ error: 'Formato de e-mail inválido.' })
+      }
+      // Validação de e-mail único
+      const conflict = await pool.query(
+        'SELECT id FROM users WHERE LOWER(email) = $1 AND id <> $2',
+        [cleanEmail, userId],
+      )
+      if ((conflict.rowCount ?? 0) > 0) {
+        return void res.status(400).json({ error: 'Este e-mail já está em uso por outro usuário. O e-mail precisa ser único.' })
+      }
+    }
+
+    const updates: string[] = []
+    const values: unknown[] = []
+    let pIndex = 1
+
+    if (name && typeof name === 'string' && name.trim()) {
+      updates.push(`name = $${pIndex++}`)
+      values.push(name.trim())
+    }
+    if (email && typeof email === 'string' && email.trim()) {
+      updates.push(`email = $${pIndex++}`)
+      values.push(email.trim().toLowerCase())
+    }
+    if (color && typeof color === 'string' && color.trim()) {
+      updates.push(`color = $${pIndex++}`)
+      values.push(color.trim())
+    }
+    if (password && typeof password === 'string' && password.length >= 6) {
+      updates.push(`password_hash = $${pIndex++}`)
+      values.push(hashPassword(password))
+    }
+
+    if (updates.length > 0) {
+      values.push(userId)
+      await pool.query(`UPDATE users SET ${updates.join(', ')} WHERE id = $${pIndex}`, values)
+    }
+
+    const updatedRes = await pool.query('SELECT id, name, email, color, avatar_url FROM users WHERE id = $1', [userId])
+    const u = updatedRes.rows[0]
+    res.json({
+      user: {
+        id: u.id,
+        name: u.name,
+        email: u.email ?? '',
+        color: u.color,
+        ...(u.avatar_url ? { avatarUrl: u.avatar_url } : {}),
+      },
+    })
+  }))
+
+  // -------------------------------------------------------------
+  // ROTAS DE EQUIPES
+  // -------------------------------------------------------------
+
+  app.get('/api/teams', authMiddleware, wrap(async (req: AuthenticatedRequest, res) => {
+    res.json(await getUserTeams(req.userId!))
+  }))
+
+  app.post('/api/teams', authMiddleware, wrap(async (req: AuthenticatedRequest, res) => {
+    const userId = req.userId!
+    const { name } = req.body ?? {}
+    if (!name || typeof name !== 'string' || !name.trim()) {
+      return void res.status(400).json({ error: 'O nome da equipe é obrigatório.' })
+    }
+
+    const teamId = `team_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 6)}`
+    const teamName = name.trim()
+
+    await tx(async (c) => {
+      await c.query('INSERT INTO teams (id, name) VALUES ($1, $2)', [teamId, teamName])
+      await c.query('INSERT INTO team_members (team_id, user_id, role) VALUES ($1, $2, $3)', [teamId, userId, 'owner'])
+    })
+
+    const teams = await getUserTeams(userId)
+    const createdTeam = teams.find((t) => t.id === teamId)
+    res.status(201).json(createdTeam)
+  }))
+
+  app.get('/api/teams/:teamId/members', authMiddleware, wrap(async (req: AuthenticatedRequest, res) => {
+    const teamId = String(req.params.teamId)
+    const userId = req.userId!
+    if (!(await isTeamMember(teamId, userId))) {
+      return void res.status(403).json({ error: 'Você não tem acesso a esta equipe.' })
+    }
+
+    const { rows } = await pool.query(
+      `SELECT u.id, u.name, u.email, u.color, u.avatar_url, tm.role, tm.joined_at AS "joinedAt"
+       FROM users u
+       JOIN team_members tm ON u.id = tm.user_id
+       WHERE tm.team_id = $1
+       ORDER BY u.name`,
+      [teamId],
+    )
+    res.json(rows.map((u) => ({
+      id: u.id,
+      name: u.name,
+      email: u.email ?? '',
+      color: u.color,
+      role: u.role,
+      joinedAt: u.joinedAt,
+      ...(u.avatar_url ? { avatarUrl: u.avatar_url } : {}),
+    })))
+  }))
+
+  // Adicionar membro na equipe simplesmente inserindo o e-mail dele se já estiver na base (sem pedido)
+  app.post('/api/teams/:teamId/members', authMiddleware, wrap(async (req: AuthenticatedRequest, res) => {
+    const teamId = String(req.params.teamId)
+    const requesterId = req.userId!
+    const { email } = req.body ?? {}
+
+    if (!(await isTeamMember(teamId, requesterId))) {
+      return void res.status(403).json({ error: 'Você não pertence a esta equipe.' })
+    }
+
+    if (!email || typeof email !== 'string' || !email.trim()) {
+      return void res.status(400).json({ error: 'Informe o e-mail do usuário a ser adicionado.' })
+    }
+
+    const cleanEmail = email.trim().toLowerCase()
+
+    // 1. Verificar se o usuário com este e-mail existe na base de dados
+    const userRes = await pool.query(
+      'SELECT id, name, email, color, avatar_url FROM users WHERE LOWER(email) = $1',
+      [cleanEmail],
+    )
+
+    if (userRes.rowCount === 0) {
+      return void res.status(404).json({
+        error: `Nenhum usuário com o e-mail "${cleanEmail}" foi encontrado na base de dados.`,
+      })
+    }
+
+    const targetUser = userRes.rows[0]
+
+    // 2. Verificar se já é membro da equipe
+    const alreadyMember = await isTeamMember(teamId, targetUser.id)
+    if (alreadyMember) {
+      return void res.status(400).json({
+        error: `O usuário ${targetUser.name} (${cleanEmail}) já faz parte desta equipe.`,
+      })
+    }
+
+    // 3. Adicionar diretamente à equipe
+    await pool.query(
+      'INSERT INTO team_members (team_id, user_id, role) VALUES ($1, $2, $3)',
+      [teamId, targetUser.id, 'member'],
+    )
+
+    // Retorna a lista atualizada de membros da equipe
+    const membersRes = await pool.query(
+      `SELECT u.id, u.name, u.email, u.color, u.avatar_url, tm.role, tm.joined_at AS "joinedAt"
+       FROM users u
+       JOIN team_members tm ON u.id = tm.user_id
+       WHERE tm.team_id = $1
+       ORDER BY u.name`,
+      [teamId],
+    )
+
+    res.status(201).json({
+      message: `${targetUser.name} foi adicionado(a) à equipe com sucesso!`,
+      addedUser: {
+        id: targetUser.id,
+        name: targetUser.name,
+        email: targetUser.email,
+        color: targetUser.color,
+        ...(targetUser.avatar_url ? { avatarUrl: targetUser.avatar_url } : {}),
+      },
+      members: membersRes.rows.map((u) => ({
+        id: u.id,
+        name: u.name,
+        email: u.email ?? '',
+        color: u.color,
+        role: u.role,
+        joinedAt: u.joinedAt,
+        ...(u.avatar_url ? { avatarUrl: u.avatar_url } : {}),
+      })),
+    })
+  }))
+
+  // Remover membro da equipe
+  app.delete('/api/teams/:teamId/members/:userId', authMiddleware, wrap(async (req: AuthenticatedRequest, res) => {
+    const teamId = String(req.params.teamId)
+    const userId = String(req.params.userId)
+    const requesterId = req.userId!
+
+    if (!(await isTeamMember(teamId, requesterId))) {
+      return void res.status(403).json({ error: 'Você não tem permissão para remover membros desta equipe.' })
+    }
+
+    // Não permitir remover a si mesmo se for o único membro
+    const memberCountRes = await pool.query('SELECT count(*)::int AS n FROM team_members WHERE team_id = $1', [teamId])
+    if (memberCountRes.rows[0].n <= 1) {
+      return void res.status(400).json({ error: 'A equipe precisa ter pelo menos um membro.' })
+    }
+
+    await pool.query('DELETE FROM team_members WHERE team_id = $1 AND user_id = $2', [teamId, userId])
     res.status(204).end()
+  }))
+
+  // -------------------------------------------------------------
+  // ROTAS DE TAREFAS E ESTADO (ISOLADAS POR EQUIPE)
+  // -------------------------------------------------------------
+
+  app.get('/api/teams/:teamId/state', authMiddleware, wrap(async (req: AuthenticatedRequest, res) => {
+    const teamId = String(req.params.teamId)
+    const userId = req.userId!
+
+    if (!(await isTeamMember(teamId, userId))) {
+      return void res.status(403).json({ error: 'Acesso negado: você não pertence a esta equipe.' })
+    }
+
+    const state = await readTeamState(teamId)
+    res.json(state)
+  }))
+
+  // Rota de compatibilidade retroativa para /api/state
+  app.get('/api/state', wrap(async (req, res) => {
+    const authHeader = req.headers.authorization
+    let teamId = req.query.teamId as string | undefined
+
+    if (authHeader?.startsWith('Bearer ')) {
+      const payload = verifyToken(authHeader.slice(7).trim())
+      if (payload) {
+        if (!teamId) {
+          const teams = await getUserTeams(payload.userId)
+          teamId = teams.find((t) => t.id === DEFAULT_TEAM_ID)?.id ?? teams[0]?.id
+        }
+      }
+    }
+
+    if (!teamId) {
+      teamId = DEFAULT_TEAM_ID
+    }
+
+    const state = await readTeamState(teamId)
+    res.json(state)
+  }))
+
+  app.put('/api/tasks/:id', authMiddleware, wrap(async (req: AuthenticatedRequest, res) => {
+    const taskId = String(req.params.id)
+    const task = { ...req.body, id: taskId }
+    if (!validTask(task)) return void res.status(400).json({ error: 'Tarefa inválida' })
+
+    const teamId = (req.body.teamId as string) || (req.query.teamId as string) || DEFAULT_TEAM_ID
+    const userId = req.userId!
+
+    if (!(await isTeamMember(teamId, userId))) {
+      return void res.status(403).json({ error: 'Você não tem permissão para editar tarefas desta equipe.' })
+    }
+
+    await tx(async (c) => {
+      await insertTask(c, task, teamId)
+      await setRelations(c, task)
+    })
+    res.json({ ...task, teamId })
+  }))
+
+  app.delete('/api/tasks/:id', authMiddleware, wrap(async (req: AuthenticatedRequest, res) => {
+    const taskId = String(req.params.id)
+    const taskRes = await pool.query('SELECT team_id FROM tasks WHERE id = $1', [taskId])
+    if (taskRes.rowCount === 0) return void res.status(204).end()
+
+    const taskTeamId = taskRes.rows[0].team_id
+    if (!(await isTeamMember(taskTeamId, req.userId!))) {
+      return void res.status(403).json({ error: 'Você não tem permissão para excluir tarefas desta equipe.' })
+    }
+
+    await pool.query('DELETE FROM tasks WHERE id=$1', [taskId])
+    res.status(204).end()
+  }))
+
+  app.post('/api/teams/:teamId/reset', authMiddleware, wrap(async (req: AuthenticatedRequest, res) => {
+    const teamId = String(req.params.teamId)
+    if (teamId !== DEFAULT_TEAM_ID) {
+      return void res.status(400).json({ error: 'Apenas a equipe Arquitetura de Computadores possui dados padrões de restauração.' })
+    }
+    await tx(resetDefaultTeam)
+    res.json(await readTeamState(teamId))
+  }))
+
+  // Compatibilidade com /api/reset legado
+  app.post('/api/reset', wrap(async (_req, res) => {
+    await tx(resetDefaultTeam)
+    res.json(await readTeamState(DEFAULT_TEAM_ID))
   }))
 
   app.get('/api/health', wrap(async (_req, res) => void res.json({ status: 'ok' })))
 
-  app.post('/api/reset', wrap(async (_req, res) => {
-    await tx(seed)
-    res.json(await readState())
-  }))
-
-  // Servir frontend compilado (produção)
+  // -------------------------------------------------------------
+  // SERVIR FRONTEND ESTÁTICO (PRODUÇÃO)
+  // -------------------------------------------------------------
   const __dirname = path.dirname(fileURLToPath(import.meta.url))
   const candidateDistPaths = [
     path.resolve(__dirname, '../dist'),

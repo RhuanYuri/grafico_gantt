@@ -15,12 +15,29 @@ export interface Dependency {
 export interface User {
   id: string
   name: string
+  email: string
   color: string
   avatarUrl?: string
 }
 
+export interface Team {
+  id: string
+  name: string
+  role?: 'owner' | 'member'
+  memberCount?: number
+  createdAt?: string
+}
+
+export interface TeamMember {
+  teamId: string
+  userId: string
+  role: string
+  joinedAt: string
+}
+
 export interface Task {
   id: string
+  teamId?: string
   title: string
   description: string
   /** Data ISO (YYYY-MM-DD), inclusiva */
@@ -30,4 +47,13 @@ export interface Task {
   status: TaskStatus
   assigneeIds: string[]
   predecessors: Dependency[]
+}
+
+export interface AuthUser extends User {}
+
+export interface AuthState {
+  token: string | null
+  user: AuthUser | null
+  teams: Team[]
+  activeTeamId: string | null
 }
